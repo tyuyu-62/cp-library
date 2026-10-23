@@ -1,3 +1,5 @@
+# Library: https://github.com/tyuyu-62/cp-library
+
 class RangeMexQueryPrefix:
     """Point updates and prefix mex queries on a fixed-length integer array."""
 
