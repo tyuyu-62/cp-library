@@ -294,6 +294,26 @@ def divisors(
     return result
 
 
+def divisors_table(m: int) -> list[list[int]]:
+    """Return a list of length m + 1 whose entry n contains all positive divisors of n
+    in increasing order. Entry 0 is empty.
+
+    Constraints:
+        m >= 0.
+
+    Time:
+        O(m log(m + 2)).
+
+    Space:
+        O(m log(m + 2)), including the result.
+    """
+    result = [[] for _ in range(m + 1)]
+    for divisor in range(1, m + 1):
+        for multiple in range(divisor, m + 1, divisor):
+            result[multiple].append(divisor)
+    return result
+
+
 def factor(n: int) -> dict[int, int]:
     """Return the prime factorization of n as a dictionary mapping each prime to its
     exponent. This is an alias of prime_factorize; n = 1 returns {}.
