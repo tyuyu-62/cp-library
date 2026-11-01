@@ -185,7 +185,7 @@ def _convolution(
     size = 1 << (result_size - 1).bit_length()
     excess = result_size - (size >> 1)
     tail = None
-    if size >= 1024 and excess <= 60:
+    if excess == 1 or size >= 1024 and excess <= 60:
         size >>= 1
         tail = [0] * excess
         for i in range(excess):
@@ -1336,8 +1336,6 @@ def polynomial_product(
     """Return the product of a polynomial sequence.
 
     The empty product is [1]. Input polynomials are not modified.
-    Polynomials are multiplied in increasing length order using a
-    two-queue Huffman merge.
 
     Constraints:
         The required transform lengths are at most 2^23.
@@ -1352,6 +1350,23 @@ def polynomial_product(
     count = len(polynomials)
     if not count:
         return [1]
+    if count >= 64 and all(
+        len(polynomial) == 2 and polynomial[1]
+        for polynomial in polynomials
+    ):
+        blocks = []
+        for start in range(0, count, 64):
+            product = [1]
+            for i in range(start, min(start + 64, count)):
+                a, b = polynomials[i]
+                product.append(product[-1] * b % MOD)
+                for j in range(len(product) - 2, 0, -1):
+                    product[j] = (
+                        product[j] * a + product[j - 1] * b
+                    ) % MOD
+                product[0] = product[0] * a % MOD
+            blocks.append(product)
+        return polynomial_product(blocks)
     queue = [None] * count
     first_length = -1
     same_length = True
