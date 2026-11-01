@@ -3794,3 +3794,115 @@ class GeneratingFunction:
         fac = self._fac
         mod = 998244353
         return [value * fac[i] % mod for i, value in enumerate(a)]
+
+
+class BinomialProduct:
+    """Accumulate factors 1 - c*x**d and their reciprocals modulo 998244353.
+
+    Constraints:
+        The output length n satisfies 0 <= n <= 2^23; every d is positive.
+
+    Time:
+        O(n) construction; see each method for updates and calculation.
+
+    Space:
+        O(n + K), where K counts distinct registered (c, d) pairs with
+        c not in {0, 1} modulo 998244353 and d < n.
+    """
+
+    def __init__(self, n: int) -> None:
+        """Set the output length n, retaining coefficients through x**(n - 1).
+
+        Constraints:
+            0 <= n <= 2^23.
+
+        Time:
+            O(n).
+
+        Space:
+            O(n).
+        """
+        self._n = n
+        self._unit = [0] * n
+        self._factors = {}
+
+    def add_numerator(self, c: int, d: int) -> None:
+        """Multiply the stored product by 1 - c*x**d; c is reduced modulo 998244353.
+
+        Constraints:
+            d > 0.
+
+        Time:
+            O(1) expected amortized.
+
+        Space:
+            O(1) additional.
+        """
+        if d < self._n:
+            c %= MOD
+            if c == 1:
+                self._unit[d] -= 1
+            elif c:
+                key = (c, d)
+                self._factors[key] = self._factors.get(key, 0) - 1
+
+    def add_denominator(self, c: int, d: int) -> None:
+        """Multiply the stored product by 1 / (1 - c*x**d); c is reduced modulo 998244353.
+
+        Constraints:
+            d > 0.
+
+        Time:
+            O(1) expected amortized.
+
+        Space:
+            O(1) additional.
+        """
+        if d < self._n:
+            c %= MOD
+            if c == 1:
+                self._unit[d] += 1
+            elif c:
+                key = (c, d)
+                self._factors[key] = self._factors.get(key, 0) + 1
+
+    def calc(self) -> list[int]:
+        """Return a new list of n coefficients of the product, in ascending degree.
+        The stored factors are unchanged, and more factors may be added afterward.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(n log n + K + S), where K is the number of stored pairs and
+            S sums floor((n - 1) / d) over distinct uncancelled factors.
+
+        Space:
+            O(n) additional.
+        """
+        n = self._n
+        if n <= 1:
+            return [1] * n
+        logarithm = [0] * n
+        for d, count in enumerate(self._unit):
+            if count:
+                weight = count * d
+                for j in range(d, n, d):
+                    logarithm[j] += weight
+        for (c, d), count in self._factors.items():
+            if count:
+                weight = count * d % MOD
+                for j in range(d, n, d):
+                    weight = weight * c % MOD
+                    logarithm[j] = (logarithm[j] + weight) % MOD
+        if not any(logarithm):
+            return [1] + [0] * (n - 1)
+        inverse = [0, 1] + [0] * (n - 2)
+        for i in range(2, n):
+            inverse[i] = MOD - MOD // i * inverse[MOD % i] % MOD
+        for i in range(1, n):
+            logarithm[i] = logarithm[i] * inverse[i] % MOD
+        if not any(logarithm[1:(n + 1) // 2]):
+            logarithm[0] = 1
+            return logarithm
+        return fps_exp(logarithm, n)
