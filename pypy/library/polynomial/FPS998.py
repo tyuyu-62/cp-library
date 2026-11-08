@@ -1573,7 +1573,7 @@ def power_sums(a: list[int], k: int) -> list[int]:
 
     Time:
         O(N K) when min(N, K) <= 60.
-        O(N log^2 N + K log K) otherwise.
+        O(N log^2(min(N, K) + 1) + K log K) otherwise.
 
     Space:
         O(N + K).
@@ -1594,9 +1594,27 @@ def power_sums(a: list[int], k: int) -> list[int]:
                 result[exponent] = total
         return result
 
-    product = polynomial_product([
-        [1, (-value) % MOD] for value in a
-    ])
+    blocks = []
+    for start in range(0, n, 64):
+        product = [1]
+        for i in range(start, min(start + 64, n)):
+            value = (-a[i]) % MOD
+            product.append(product[-1] * value % MOD)
+            for j in range(len(product) - 2, 0, -1):
+                product[j] = (
+                    product[j] + product[j - 1] * value
+                ) % MOD
+        blocks.append(_trim(product[:k + 1]))
+    while len(blocks) > 1:
+        next_blocks = []
+        for i in range(0, len(blocks) - 1, 2):
+            next_blocks.append(_trim(
+                _convolution(blocks[i], blocks[i + 1])[:k + 1]
+            ))
+        if len(blocks) & 1:
+            next_blocks.append(blocks[-1])
+        blocks = next_blocks
+    product = blocks[0]
     derivative = fps_diff(product)
     for i, value in enumerate(derivative):
         derivative[i] = MOD - value if value else 0
@@ -1762,6 +1780,32 @@ def _matrix_apply(
     a: list[int],
     b: list[int],
 ) -> tuple[list[int], list[int]]:
+    if min(map(len, matrix + (a, b))) > 60:
+        result_size = max(
+            len(matrix[0]) + len(a), len(matrix[1]) + len(b),
+            len(matrix[2]) + len(a), len(matrix[3]) + len(b),
+        ) - 1
+        size = 1 << (result_size - 1).bit_length()
+        if result_size - (size >> 1) > 60:
+            transformed = []
+            for polynomial in matrix + (a, b):
+                values = polynomial + [0] * (size - len(polynomial))
+                _butterfly(values)
+                transformed.append(values)
+            m00, m01, m10, m11, x, y = transformed
+            inverse = pow(size, MOD - 2, MOD)
+            result = []
+            for u, v in ((m00, m01), (m10, m11)):
+                values = [
+                    (u[i] * x[i] + v[i] * y[i]) % MOD
+                    for i in range(size)
+                ]
+                _butterfly_inv(values)
+                result.append(_trim([
+                    values[i] * inverse % MOD
+                    for i in range(result_size)
+                ]))
+            return result[0], result[1]
     m00, m01, m10, m11 = matrix
     return (
         _polynomial_add_raw(
@@ -1783,6 +1827,35 @@ def _matrix_mul(
         list[int], list[int], list[int], list[int]
     ],
 ) -> tuple[list[int], list[int], list[int], list[int]]:
+    if min(map(len, left + right)) > 60:
+        result_size = max(
+            len(left[i]) + len(right[j])
+            for i, j in ((0, 0), (1, 2), (0, 1), (1, 3),
+                         (2, 0), (3, 2), (2, 1), (3, 3))
+        ) - 1
+        size = 1 << (result_size - 1).bit_length()
+        transformed = []
+        for polynomial in left + right:
+            values = polynomial + [0] * (size - len(polynomial))
+            _butterfly(values)
+            transformed.append(values)
+        a, b, c, d, e, f, g, h = transformed
+        inverse = pow(size, MOD - 2, MOD)
+        result = []
+        for u, v, w, z in (
+            (a, e, b, g), (a, f, b, h),
+            (c, e, d, g), (c, f, d, h),
+        ):
+            values = [
+                (u[i] * v[i] + w[i] * z[i]) % MOD
+                for i in range(size)
+            ]
+            _butterfly_inv(values)
+            result.append(_trim([
+                values[i] * inverse % MOD
+                for i in range(result_size)
+            ]))
+        return tuple(result)
     a, b, c, d = left
     e, f, g, h = right
     return (
@@ -2061,10 +2134,24 @@ def _shift_sampling_segment(
         reciprocals[i] = inverse * prefix[i] % MOD
         inverse = inverse * (base + i) % MOD
 
-    product = _convolution(weighted, reciprocals)
+    if n <= 60:
+        product = _convolution(weighted, reciprocals)
+        scale = 1
+    else:
+        size = 1 << (length - 1).bit_length()
+        weighted += [0] * (size - n)
+        reciprocals_transform = reciprocals + [0] * (size - length)
+        _butterfly(weighted)
+        _butterfly(reciprocals_transform)
+        for i in range(size):
+            weighted[i] = weighted[i] * reciprocals_transform[i] % MOD
+        _butterfly_inv(weighted)
+        product = weighted
+        scale = pow(size, MOD - 2, MOD)
     falling = 1
     for i in range(n):
         falling = falling * (shift - i) % MOD
+    falling = falling * scale % MOD
     result = [0] * count
     for i in range(count):
         result[i] = product[n - 1 + i] * falling % MOD
@@ -3243,7 +3330,7 @@ def _equal_degree_factorization(
             split = polynomial_gcd(random_polynomial, current)
             if 1 < len(split) < len(current):
                 break
-            powered = _pow_mod(random_polynomial, exponent, current)
+            powered = polynomial_pow_mod(random_polynomial, exponent, current)
             split = polynomial_gcd(
                 polynomial_sub(powered, [1]), current
             )
@@ -3265,7 +3352,7 @@ def _factor_square_free(
     x_power = [0, 1]
     degree = 1
     while degree * 2 <= len(remaining) - 1:
-        x_power = _pow_mod(x_power, MOD, remaining)
+        x_power = polynomial_pow_mod(x_power, MOD, remaining)
         difference = polynomial_sub(x_power, [0, 1])
         part = polynomial_gcd(difference, remaining)
         if len(part) > 1:
@@ -3348,7 +3435,7 @@ def polynomial_roots(polynomial: list[int]) -> list[int]:
     if len(polynomial) == 1:
         return []
     linear_part = polynomial_gcd(
-        polynomial_sub(_pow_mod([0, 1], MOD, polynomial), [0, 1]),
+        polynomial_sub(polynomial_pow_mod([0, 1], MOD, polynomial), [0, 1]),
         polynomial,
     )
     stack = [_monic(linear_part)] if len(linear_part) > 1 else []
@@ -3362,7 +3449,7 @@ def polynomial_roots(polynomial: list[int]) -> list[int]:
             continue
         while True:
             shifted_x = [rng.randrange(MOD), 1]
-            powered = _pow_mod(shifted_x, exponent, current)
+            powered = polynomial_pow_mod(shifted_x, exponent, current)
             split = polynomial_gcd(
                 polynomial_sub(powered, [1]), current
             )
@@ -3412,7 +3499,7 @@ def power_projection(
     denominator = [1] + [0] * (width - 1)
     denominator += [(-value) % MOD for value in f[:n + 1]]
     while width > 1:
-        stride = (width << 1) - 1
+        stride = width << 1
         encoded_numerator = [0] * (
             ((len(numerator) + width - 1) // width) * stride
         )
@@ -3423,30 +3510,58 @@ def power_projection(
             encoded_numerator[(i // width) * stride + i % width] = value
         for i, value in enumerate(denominator):
             encoded_denominator[(i // width) * stride + i % width] = value
-        reflected = encoded_denominator.copy()
-        for offset in range(0, len(reflected), stride):
-            for i in range(1, width, 2):
-                index = offset + i
-                reflected[index] = (-reflected[index]) % MOD
-        reflected = _trim(reflected)
-        products = (
-            _convolution(_trim(encoded_numerator), reflected),
-            _convolution(_trim(encoded_denominator), reflected),
-        )
+        _trim(encoded_numerator)
+        _trim(encoded_denominator)
         next_width = width >> 1
-        reduced = []
-        for parity, product in zip((1, 0), products):
-            rows = min(count, (len(product) + stride - 1) // stride)
-            values = [0] * (rows * next_width)
-            for row in range(rows):
-                source = row * stride + parity
-                target = row * next_width
-                for i in range(next_width):
-                    index = source + (i << 1)
-                    if index < len(product):
-                        values[target + i] = product[index]
-            reduced.append(_trim(values))
-        numerator, denominator = reduced
+        numerator_size = len(encoded_numerator) + len(encoded_denominator) - 1
+        denominator_size = len(encoded_denominator) * 2 - 1
+        if min(len(encoded_numerator), len(encoded_denominator)) <= 60:
+            reflected = encoded_denominator.copy()
+            for i in range(1, len(reflected), 2):
+                reflected[i] = (-reflected[i]) % MOD
+            product_p = _convolution(encoded_numerator, reflected)
+            product_q = _convolution(encoded_denominator, reflected)[::2]
+            scale_p = scale_q = 1
+        else:
+            size = 1 << (max(numerator_size, denominator_size) - 1).bit_length()
+            numerator_transform_size = 1 << (numerator_size - 1).bit_length()
+            encoded_numerator += [0] * (numerator_transform_size - len(encoded_numerator))
+            encoded_denominator += [0] * (size - len(encoded_denominator))
+            _butterfly(encoded_numerator)
+            _butterfly(encoded_denominator)
+            product_q = [
+                encoded_denominator[i] * encoded_denominator[i + 1] % MOD
+                for i in range(0, size, 2)
+            ]
+            for i in range(numerator_transform_size):
+                encoded_numerator[i] = (
+                    encoded_numerator[i] * encoded_denominator[i ^ 1] % MOD
+                )
+            product_p = encoded_numerator
+            _butterfly_inv(product_p)
+            _butterfly_inv(product_q)
+            scale_p = pow(numerator_transform_size, MOD - 2, MOD)
+            scale_q = pow(size >> 1, MOD - 2, MOD)
+        rows = min(count, (max(0, numerator_size) + stride - 1) // stride)
+        numerator = [0] * (rows * next_width)
+        for row in range(rows):
+            source = row * stride + 1
+            target = row * next_width
+            for i in range(next_width):
+                index = source + (i << 1)
+                if index < len(product_p):
+                    numerator[target + i] = product_p[index] * scale_p % MOD
+        rows = min(count, (denominator_size + stride - 1) // stride)
+        denominator = [0] * (rows * next_width)
+        for row in range(rows):
+            source = row * width
+            target = row * next_width
+            for i in range(next_width):
+                index = source + i
+                if index < len(product_q):
+                    denominator[target + i] = product_q[index] * scale_q % MOD
+        _trim(numerator)
+        _trim(denominator)
         width = next_width
     return fps_div(numerator, denominator, count)
 
