@@ -464,6 +464,38 @@ def fps_div(
     return result
 
 
+def fps_newton(evaluate, y0: int, deg: int) -> list[int]:
+    """Return deg coefficients of the solution Y to F(x, Y) = 0 with Y[0] = y0.
+    evaluate(y, k) receives a read-only length-k coefficient list and returns
+    (F(x, y), F_Y(x, y)) modulo x^k, with omitted trailing zeros allowed.
+
+    Constraints:
+        0 <= deg <= 2^23; coefficients are modulo 998244353.
+        F admits a formal Taylor expansion in Y; F(0, y0) = 0 and F_Y(0, y0) != 0.
+        evaluate must not mutate y; its own FPS operations must be defined.
+        All NTT lengths used by evaluate must be at most 2^23.
+
+    Time:
+        O(deg log(deg + 1) + sum(E(k))) for callback time E(k),
+        where k doubles from 2, with the last value capped at deg.
+
+    Space:
+        O(deg + max(S(k))) for callback auxiliary space S(k).
+    """
+    if not deg:
+        return []
+    result = [y0 % MOD]
+    length = 1
+    while length < deg:
+        size = min(length * 2, deg)
+        result += [0] * (size - length)
+        value, derivative = evaluate(result, size)
+        correction = fps_div(value[length:size], derivative, size - length)
+        result[length:] = fps_neg(correction)
+        length = size
+    return result
+
+
 def fps_diff(a: list[int]) -> list[int]:
     """Return the formal derivative of a.
 
@@ -3828,6 +3860,726 @@ def polynomial_resultant(
                 result = (-result) % MOD
             a, b = b, remainder
     return result * pow(b[0], len(a) - 1, MOD) % MOD
+
+
+class FPS:
+    """Represent coefficients modulo 998244353 known through degree deg - 1.
+    Coefficients omitted within that range are zero, and operations that
+    return a series produce an independent result.
+    Arithmetic converts coefficient lists at the precision of the FPS operand.
+
+    Constraints:
+        Required NTT lengths are at most 2^23.
+        List operands contain coefficients in [0, 998244353).
+
+    Time:
+        See each operation.
+
+    Space:
+        O(min(len(coeffs), deg)) for construction.
+    """
+
+    __slots__ = ("_coeffs", "_deg")
+
+    def __init__(self, coeffs: list[int], deg: int) -> None:
+        """Copy the coefficients below degree deg, in increasing degree order.
+
+        Constraints:
+            deg >= 0; 0 <= coeffs[i] < 998244353.
+
+        Time:
+            O(min(len(coeffs), deg)).
+
+        Space:
+            O(min(len(coeffs), deg)).
+        """
+        self._coeffs = coeffs[:deg]
+        self._deg = deg
+
+    @staticmethod
+    def _from_coeffs(coeffs, deg):
+        result = object.__new__(FPS)
+        result._coeffs = coeffs
+        result._deg = deg
+        return result
+
+    @property
+    def deg(self) -> int:
+        """Return the number of known coefficients.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1).
+        """
+        return self._deg
+
+    def __len__(self) -> int:
+        """Return the number of known coefficients.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1).
+        """
+        return self._deg
+
+    def __getitem__(self, i: int | slice):
+        """Return the coefficient of x**i, or an independent copy for [:].
+
+        Constraints:
+            An integer index satisfies 0 <= i < deg; the only slice is [:].
+
+        Time:
+            O(1) for an index; O(N) for [:], where N is the stored length.
+
+        Space:
+            O(1) for an index; O(N) for [:].
+        """
+        if isinstance(i, slice):
+            if i == slice(None):
+                return self.copy()
+            raise TypeError("FPS supports only the full slice [:]")
+        if not 0 <= i < self._deg:
+            raise IndexError("FPS coefficient index is outside the known precision")
+        return self._coeffs[i] if i < len(self._coeffs) else 0
+
+    def __setitem__(self, i: int, value: int) -> None:
+        """Set the coefficient of x**i to value modulo 998244353 at the same precision.
+
+        Constraints:
+            0 <= i < deg; value is an integer.
+
+        Time:
+            O(1) for a stored coefficient or zero; amortized O(i + 1 - N)
+            when extending past the N stored coefficients.
+
+        Space:
+            O(1) if the stored length stays the same; otherwise i + 1 - N
+            coefficients are added.
+        """
+        if not 0 <= i < self._deg:
+            raise IndexError("FPS coefficient index is outside the known precision")
+        value %= MOD
+        coeffs = self._coeffs
+        size = len(coeffs)
+        if i < size:
+            coeffs[i] = value
+        elif value:
+            coeffs.extend([0] * (i - size))
+            coeffs.append(value)
+
+    def copy(self):
+        """Return an independent copy of the series at the same precision.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(N), where N is the number of stored coefficients.
+
+        Space:
+            O(N).
+        """
+        return self._from_coeffs(self._coeffs.copy(), self._deg)
+
+    def to_list(self) -> list[int]:
+        """Return a new list of all deg known coefficients, including trailing zeros.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(deg).
+
+        Space:
+            O(deg).
+        """
+        coeffs = self._coeffs.copy()
+        coeffs += [0] * (self._deg - len(coeffs))
+        return coeffs
+
+    def __str__(self) -> str:
+        """Return the string form of to_list(), including trailing zeros.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(deg + 1).
+
+        Space:
+            O(deg + 1).
+        """
+        return str(self.to_list())
+
+    def __repr__(self) -> str:
+        """Return a constructor expression containing the coefficients and precision.
+        Omit trailing zero coefficients from the expression.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(N + 1), where N is the number of stored coefficients.
+
+        Space:
+            O(N + 1).
+        """
+        size = len(self._coeffs)
+        while size and not self._coeffs[size - 1]:
+            size -= 1
+        return f"FPS({self._prefix(size)!r}, deg={self._deg})"
+
+    def __eq__(self, other):
+        """Compare precision and all known coefficients with another FPS.
+
+        Constraints:
+            Missing coefficients within the precision are treated as zero.
+
+        Time:
+            O(N + M + 1) for the stored lengths N and M.
+
+        Space:
+            O(1).
+        """
+        if not isinstance(other, FPS):
+            return NotImplemented
+        if self._deg != other._deg:
+            return False
+        left, right = self._coeffs, other._coeffs
+        if len(left) == len(right):
+            return left == right
+        if len(left) < len(right):
+            left, right = right, left
+        for i, value in enumerate(right):
+            if left[i] != value:
+                return False
+        for i in range(len(right), len(left)):
+            if left[i]:
+                return False
+        return True
+
+    def _prefix(self, deg):
+        return self._coeffs[:deg] if len(self._coeffs) > deg else self._coeffs
+
+    def truncate(self, deg: int):
+        """Return an independent series with only the coefficients below degree deg known.
+
+        Constraints:
+            0 <= deg <= self.deg.
+
+        Time:
+            O(min(N, deg)), where N is the number of stored coefficients.
+
+        Space:
+            O(min(N, deg)).
+        """
+        if not 0 <= deg <= self._deg:
+            raise ValueError("FPS truncate requires a precision between 0 and deg")
+        return self._from_coeffs(self._coeffs[:deg], deg)
+
+    def _parts(self, other, deg=None):
+        is_fps = isinstance(other, FPS)
+        limit = min(self._deg, other._deg) if is_fps else self._deg
+        if deg is None:
+            deg = limit
+        elif not 0 <= deg <= limit:
+            raise ValueError("FPS result precision is outside the common precision")
+        if is_fps:
+            left = self._prefix(deg)
+            return left, left if other is self else other._prefix(deg), deg
+        if isinstance(other, list):
+            right = FPS(other, deg)._coeffs
+        elif isinstance(other, int):
+            right = [other % MOD] if deg else []
+        else:
+            return None
+        return self._prefix(deg), right, deg
+
+    def __add__(self, other):
+        """Return self plus a series, coefficient list, or integer at their common precision.
+
+        Constraints:
+            An integer represents a constant at self.deg precision.
+
+        Time:
+            O(k) for result precision k.
+
+        Space:
+            O(k).
+        """
+        parts = self._parts(other)
+        if parts is None:
+            return NotImplemented
+        left, right, deg = parts
+        return self._from_coeffs(fps_add(left, right), deg)
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        """Return self minus a series, coefficient list, or integer at their common precision.
+
+        Constraints:
+            An integer represents a constant at self.deg precision.
+
+        Time:
+            O(k) for result precision k.
+
+        Space:
+            O(k).
+        """
+        parts = self._parts(other)
+        if parts is None:
+            return NotImplemented
+        left, right, deg = parts
+        return self._from_coeffs(fps_sub(left, right), deg)
+
+    def __rsub__(self, other):
+        """Return other minus self at their common precision.
+
+        Constraints:
+            other follows the class's arithmetic operand rules.
+
+        Time:
+            O(k) for result precision k.
+
+        Space:
+            O(k).
+        """
+        parts = self._parts(other)
+        if parts is None:
+            return NotImplemented
+        right, left, deg = parts
+        return self._from_coeffs(fps_sub(left, right), deg)
+
+    def __neg__(self):
+        """Return the negated series at the same precision.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(deg).
+
+        Space:
+            O(deg).
+        """
+        return self._from_coeffs(fps_neg(self._coeffs), self._deg)
+
+    def _scale(self, scale):
+        coeffs = [value * scale % MOD for value in self._coeffs] if scale else []
+        return self._from_coeffs(coeffs, self._deg)
+
+    def __mul__(self, other):
+        """Return self times a series, coefficient list, or integer at their common precision.
+
+        Constraints:
+            An integer represents a constant at self.deg precision.
+
+        Time:
+            O(k log(k + 1)) for result precision k; O(k) for an integer.
+
+        Space:
+            O(k).
+        """
+        if isinstance(other, int):
+            return self._scale(other % MOD)
+        parts = self._parts(other)
+        if parts is None:
+            return NotImplemented
+        return self._product(*parts)
+
+    __rmul__ = __mul__
+
+    def mul(self, other, deg: int):
+        """Return the product with other modulo x**deg.
+        Both operands are cut to the requested precision before multiplication.
+
+        Constraints:
+            other is an FPS, coefficient list, or integer.
+            0 <= deg <= the common precision of the operands.
+
+        Time:
+            O(deg log(deg + 1) + 1).
+
+        Space:
+            O(deg + 1).
+        """
+        parts = self._parts(other, deg)
+        if parts is None:
+            raise TypeError("FPS multiplication requires a series, coefficient list, or integer")
+        return self._product(*parts)
+
+    @staticmethod
+    def _product(left, right, deg):
+        result = _convolution(left, right)
+        if len(result) > deg:
+            del result[deg:]
+        return FPS._from_coeffs(result, deg)
+
+    @staticmethod
+    def _quotient(numerator, denominator, deg):
+        if not deg:
+            return FPS._from_coeffs([], 0)
+        if not denominator or not denominator[0]:
+            raise ValueError("FPS division requires a nonzero denominator constant term")
+        if not numerator:
+            return FPS._from_coeffs([], deg)
+        if len(denominator) == 1:
+            result = fps_div(numerator, denominator, len(numerator))
+        else:
+            result = fps_div(numerator, denominator, deg)
+        return FPS._from_coeffs(result, deg)
+
+    def __truediv__(self, other):
+        """Return self divided by a series, coefficient list, or integer at their common precision.
+
+        Constraints:
+            For positive result precision k, the divisor has nonzero constant term.
+
+        Time:
+            O(k log(k + 1)); O(k + log(MOD)) for an integer.
+
+        Space:
+            O(k).
+        """
+        parts = self._parts(other)
+        if parts is None:
+            return NotImplemented
+        numerator, denominator, deg = parts
+        return self._quotient(numerator, denominator, deg)
+
+    def __rtruediv__(self, other):
+        """Return other divided by self at their common precision.
+
+        Constraints:
+            self has nonzero constant term at positive result precision k.
+
+        Time:
+            O(k log(k + 1)).
+
+        Space:
+            O(k).
+        """
+        parts = self._parts(other)
+        if parts is None:
+            return NotImplemented
+        denominator, numerator, deg = parts
+        return self._quotient(numerator, denominator, deg)
+
+    def __pow__(self, exponent: int):
+        """Raise the series to exponent at the same precision.
+
+        Constraints:
+            exponent is a nonnegative integer.
+
+        Time:
+            O(deg log(deg + 1) + log(exponent + 1)).
+
+        Space:
+            O(deg).
+        """
+        coeffs = fps_pow(self._coeffs, exponent, self._deg)
+        return self._from_coeffs(coeffs, self._deg)
+
+    def diff(self):
+        """Return the derivative with precision max(deg - 1, 0).
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(deg).
+
+        Space:
+            O(deg).
+        """
+        return self._from_coeffs(fps_diff(self._coeffs), max(self._deg - 1, 0))
+
+    def integral(self):
+        """Return the antiderivative with constant term zero and precision deg + 1.
+
+        Constraints:
+            deg < 998244353.
+
+        Time:
+            O(N + 1), where N is the number of stored coefficients.
+
+        Space:
+            O(N + 1).
+        """
+        return self._from_coeffs(fps_integral(self._coeffs), self._deg + 1)
+
+    def valuation(self) -> int:
+        """Return the first nonzero coefficient's degree, or deg if all known terms vanish.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(N + 1), where N is the number of stored coefficients.
+
+        Space:
+            O(1).
+        """
+        for i, value in enumerate(self._coeffs):
+            if value:
+                return i
+        return self._deg
+
+    def shift(self, amount: int):
+        """Shift coefficient indices by amount and discard negative indices.
+        The result has precision max(deg + amount, 0).
+
+        Constraints:
+            amount is an integer.
+
+        Time:
+            O(deg + max(amount, 0)).
+
+        Space:
+            O(deg + max(amount, 0)).
+        """
+        if amount <= 0:
+            coeffs = self._coeffs[-amount:]
+        elif self._coeffs:
+            coeffs = [0] * amount + self._coeffs
+        else:
+            coeffs = []
+        return self._from_coeffs(coeffs, max(self._deg + amount, 0))
+
+    def __lshift__(self, k: int):
+        """Multiply the series by x**k, increasing the precision by k.
+
+        Constraints:
+            k is a nonnegative integer.
+
+        Time:
+            O(k + N), where N is the number of stored coefficients.
+
+        Space:
+            O(k + N).
+        """
+        if not isinstance(k, int):
+            return NotImplemented
+        if k < 0:
+            raise ValueError("negative shift count")
+        return self.shift(k)
+
+    def __rshift__(self, k: int):
+        """Multiply by x**(-k) and discard negative-degree terms.
+        The result has precision max(deg - k, 0).
+
+        Constraints:
+            k is a nonnegative integer.
+
+        Time:
+            O(1 + max(N - k, 0)), where N is the number of stored coefficients.
+
+        Space:
+            O(1 + max(N - k, 0)).
+        """
+        if not isinstance(k, int):
+            return NotImplemented
+        if k < 0:
+            raise ValueError("negative shift count")
+        return self.shift(-k)
+
+    def ogf_to_egf(self, converter=None):
+        """Divide the coefficient of x**i by i!, preserving the precision.
+        Pass a GeneratingFunction converter to reuse its factorial tables.
+
+        Constraints:
+            deg <= 998244353.
+
+        Time:
+            O(N) with cached tables, where N is the number of stored
+            coefficients; O(K + log(MOD)) when extending to K entries.
+
+        Space:
+            O(N) for the result and O(K) for newly allocated tables.
+        """
+        if converter is None:
+            converter = GeneratingFunction()
+        return self._from_coeffs(converter.ogf_to_egf(self._coeffs), self._deg)
+
+    def egf_to_ogf(self, converter=None):
+        """Multiply the ordinary coefficient of x**i by i!, preserving precision.
+        Pass a GeneratingFunction converter to reuse its factorial tables.
+
+        Constraints:
+            deg <= 998244353.
+
+        Time:
+            O(N) with cached tables, where N is the number of stored
+            coefficients; O(K + log(MOD)) when extending to K entries.
+
+        Space:
+            O(N) for the result and O(K) for newly allocated tables.
+        """
+        if converter is None:
+            converter = GeneratingFunction()
+        return self._from_coeffs(converter.egf_to_ogf(self._coeffs), self._deg)
+
+    def inv(self):
+        """Return the multiplicative inverse at the same precision.
+
+        Constraints:
+            If deg > 0, the constant term is nonzero.
+
+        Time:
+            O(deg log(deg + 1)).
+
+        Space:
+            O(deg).
+        """
+        coeffs = self._coeffs
+        if self._deg and (not coeffs or not coeffs[0]):
+            raise ValueError("FPS inverse requires a nonzero constant term")
+        if len(coeffs) == 1:
+            inverse = fps_inv(coeffs, 1)
+        else:
+            inverse = fps_inv(coeffs, self._deg)
+        return self._from_coeffs(inverse, self._deg)
+
+    def log(self):
+        """Return the formal logarithm at the same precision.
+
+        Constraints:
+            If deg > 0, the constant term is 1.
+
+        Time:
+            O(deg log(deg + 1)).
+
+        Space:
+            O(deg).
+        """
+        if self._deg and (not self._coeffs or self._coeffs[0] != 1):
+            raise ValueError("FPS logarithm requires constant term 1")
+        return self._from_coeffs(fps_log(self._coeffs, self._deg), self._deg)
+
+    def exp(self):
+        """Return the formal exponential at the same precision.
+
+        Constraints:
+            If deg > 0, the constant term is zero.
+
+        Time:
+            O(deg log(deg + 1)).
+
+        Space:
+            O(deg).
+        """
+        if self._coeffs and self._coeffs[0]:
+            raise ValueError("FPS exponential requires constant term 0")
+        return self._from_coeffs(fps_exp(self._coeffs, self._deg), self._deg)
+
+    def sqrt(self):
+        """Return the square root with the smaller leading residue, or None if none exists.
+        A first nonzero term of degree 2t gives precision deg - t; a zero
+        prefix gives a zero prefix of precision ceil(deg / 2).
+
+        Constraints:
+            Required NTT lengths are at most 2^23.
+
+        Time:
+            O(deg log(deg + 1) + 1).
+
+        Space:
+            O(deg + 1).
+        """
+        leading = self.valuation()
+        if leading == self._deg:
+            return self._from_coeffs([], (self._deg + 1) // 2)
+        if leading & 1:
+            return None
+        coeffs = self._coeffs[leading:] if leading else self._coeffs
+        root = fps_sqrt(coeffs, self._deg - leading)
+        if root is None:
+            return None
+        shift = leading // 2
+        if shift:
+            root = [0] * shift + root
+        return self._from_coeffs(root, self._deg - shift)
+
+    def compose(self, other):
+        """Return self(other(x)) at the common precision of the operands.
+
+        Constraints:
+            other is an FPS, coefficient list, or integer with constant term
+            zero at positive result precision k.
+
+        Time:
+            O(k log(k + 1)**2 + 1).
+
+        Space:
+            O(k log(k + 1) + 1).
+        """
+        parts = self._parts(other)
+        if parts is None:
+            raise TypeError("FPS composition requires a series, coefficient list, or integer")
+        outer, inner, deg = parts
+        if inner and inner[0]:
+            raise ValueError("FPS composition requires inner constant term 0")
+        return self._from_coeffs(fps_compose(outer, inner, deg), deg)
+
+    def compositional_inverse(self):
+        """Return the compositional inverse at the same precision.
+
+        Constraints:
+            The constant term is zero if deg > 0 and the linear term is
+            nonzero if deg > 1.
+
+        Time:
+            O(deg log(deg + 1)**2).
+
+        Space:
+            O(deg log(deg + 1)).
+        """
+        coeffs = self._coeffs
+        if coeffs and coeffs[0]:
+            raise ValueError("FPS compositional inverse requires constant term 0")
+        if self._deg > 1 and (len(coeffs) < 2 or not coeffs[1]):
+            raise ValueError("FPS compositional inverse requires a nonzero linear term")
+        inverse = fps_compositional_inverse(coeffs, self._deg)
+        return self._from_coeffs(inverse, self._deg)
+
+    @staticmethod
+    def newton(evaluate, y0: int, deg: int):
+        """Solve F(x, Y) = 0 with Y[0] = y0 to precision deg.
+        evaluate(y) receives an FPS at the current precision k and returns
+        the residual and the derivative with respect to Y as two FPS values.
+
+        Constraints:
+            0 <= deg <= 2^23; F admits a formal Taylor expansion in Y.
+            F(0, y0) = 0 and the derivative at (0, y0) is nonzero.
+            Both callback results have precision at least k.
+
+        Time:
+            O(deg log(deg + 1) + sum(E(k))) for callback time E(k),
+            with k doubling from 2 and capped at deg.
+
+        Space:
+            O(deg + max(S(k))) for callback workspace S(k).
+        """
+        def evaluate_coeffs(coeffs, precision):
+            value, derivative = evaluate(FPS(coeffs, precision))
+            if min(value._deg, derivative._deg) < precision:
+                raise ValueError("FPS Newton callback returned insufficient precision")
+            if not derivative._coeffs or not derivative._coeffs[0]:
+                raise ValueError("FPS Newton callback derivative has zero constant term")
+            return value._coeffs, derivative._coeffs
+
+        return FPS._from_coeffs(fps_newton(evaluate_coeffs, y0, deg), deg)
 
 
 class GeneratingFunction:
