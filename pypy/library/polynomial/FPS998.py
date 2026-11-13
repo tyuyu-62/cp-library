@@ -4585,6 +4585,478 @@ class FPS:
         return FPS._from_coeffs(fps_newton(evaluate_coeffs, y0, deg), deg)
 
 
+class BostanMori:
+    """Represent an exact rational Laurent series modulo 998244353.
+    Arithmetic accepts another BostanMori, a polynomial coefficient list, or an integer.
+
+    Constraints:
+        Denominators are nonzero polynomials modulo 998244353.
+        Required NTT lengths are at most 2^23.
+
+    Time:
+        See each operation.
+
+    Space:
+        O(N) for N stored numerator and denominator coefficients in total.
+    """
+
+    __slots__ = ("_numerator", "_denominator", "_offset")
+    _ONE = [1]
+
+    def __init__(self, numerator: list[int] | int, denominator: list[int] | int = 1) -> None:
+        """Store numerator and denominator as polynomials with coefficients in increasing degree order.
+        Integers represent constants, and all coefficients are reduced modulo 998244353.
+
+        Constraints:
+            The denominator is a nonzero polynomial modulo 998244353.
+
+        Time:
+            O(N + 1) for N input coefficients in total.
+
+        Space:
+            O(N + 1).
+        """
+        denominator = self._coefficients(denominator)
+        if not denominator:
+            raise ValueError("BostanMori requires a nonzero denominator")
+        denominator_order = self._order(denominator)
+        self._denominator = denominator[denominator_order:] if denominator_order else denominator
+        numerator, self._offset = self._normalize(self._coefficients(numerator), -denominator_order)
+        self._numerator = numerator
+
+    @staticmethod
+    def _coefficients(value):
+        if isinstance(value, int):
+            value %= MOD
+            return [value] if value else []
+        return _trim([coefficient % MOD for coefficient in value])
+
+    @staticmethod
+    def _order(coeffs):
+        order = 0
+        while not coeffs[order]:
+            order += 1
+        return order
+
+    @staticmethod
+    def _normalize(numerator, offset):
+        if not numerator:
+            return numerator, 0
+        if numerator[0]:
+            return numerator, offset
+        order = BostanMori._order(numerator)
+        return numerator[order:], offset + order
+
+    @staticmethod
+    def _from_parts(numerator, denominator, offset=0):
+        result = object.__new__(BostanMori)
+        result._numerator, result._offset = BostanMori._normalize(numerator, offset)
+        result._denominator = denominator
+        return result
+
+    def copy(self):
+        """Return a separate BostanMori representing the same rational function.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1) additional.
+        """
+        return self._from_parts(self._numerator, self._denominator, self._offset)
+
+    def __getitem__(self, k: int | slice):
+        """Return the coefficient of x**k, or a copy for the full slice [:].
+
+        Constraints:
+            The only slice is [:]. Negative indices refer to negative degrees.
+
+        Time:
+            See calc_kth for an integer index; O(1) for [:].
+
+        Space:
+            See calc_kth for an integer index; O(1) additional for [:].
+        """
+        if isinstance(k, slice):
+            if k == slice(None):
+                return self.copy()
+            raise TypeError("BostanMori supports only the full slice [:]")
+        if not isinstance(k, int):
+            raise TypeError("BostanMori coefficient index must be an integer")
+        return self.calc_kth(k)
+
+    def __setitem__(self, k: int, value: int) -> None:
+        """Replace the coefficient of x**k with value modulo 998244353.
+
+        Constraints:
+            k and value are integers.
+
+        Time:
+            Time of calc_kth(k) plus O(P + Q + D), where D is the gap from
+            k to the current lowest degree, or zero for a zero function.
+
+        Space:
+            O(P + Q + D) for numerator length P and denominator length Q.
+        """
+        if not isinstance(k, int):
+            raise TypeError("BostanMori coefficient index must be an integer")
+        delta = (value - self.calc_kth(k)) % MOD
+        if delta:
+            numerator, denominator = self._numerator, self._denominator
+            offset = min(k, self._offset) if numerator else k
+            index = k - offset
+            updated = [0] * (self._offset - offset) + numerator if numerator else []
+            updated += [0] * (index + len(denominator) - len(updated))
+            for i, coefficient in enumerate(denominator, index):
+                updated[i] = (updated[i] + delta * coefficient) % MOD
+            self._numerator, self._offset = self._normalize(_trim(updated), offset)
+
+    def __eq__(self, other):
+        """Compare the rational function with another BostanMori.
+
+        Constraints:
+            Required NTT lengths are at most 2^23.
+
+        Time:
+            O(N log(N + 1)) for N coefficients across the operands.
+
+        Space:
+            O(N) additional.
+        """
+        if not isinstance(other, BostanMori):
+            return NotImplemented
+        if self._offset != other._offset:
+            return False
+        left, right = self._numerator, other._numerator
+        if not left or not right or self._denominator == other._denominator:
+            return left == right
+        return self._multiply(left, other._denominator) == self._multiply(right, self._denominator)
+
+    def __repr__(self) -> str:
+        """Return a constructor expression for the stored numerator and denominator.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(N) for N stored coefficients.
+
+        Space:
+            O(N).
+        """
+        result = f"BostanMori({self._numerator!r}, {self._denominator!r})"
+        if self._offset:
+            return f"{result}.shift({self._offset})"
+        return result
+
+    @staticmethod
+    def _coerce(other):
+        if isinstance(other, BostanMori):
+            return other
+        if isinstance(other, (int, list)):
+            return BostanMori._from_parts(BostanMori._coefficients(other), BostanMori._ONE)
+        return NotImplemented
+
+    @staticmethod
+    def _multiply(left, right):
+        if left == BostanMori._ONE:
+            return right
+        if right == BostanMori._ONE:
+            return left
+        return polynomial_mul(left, right)
+
+    def _sum(self, other, combine):
+        other = self._coerce(other)
+        if other is NotImplemented:
+            return NotImplemented
+        if not other._numerator:
+            return self.copy()
+        if not self._numerator:
+            return other.copy() if combine is polynomial_add else -other
+        left_denominator = self._denominator
+        right_denominator = other._denominator
+        left, right = self._numerator, other._numerator
+        if left_denominator == right_denominator:
+            denominator = left_denominator
+        else:
+            left = self._multiply(left, right_denominator)
+            right = self._multiply(right, left_denominator)
+            denominator = self._multiply(left_denominator, right_denominator)
+        left_offset, right_offset = self._offset, other._offset
+        offset = min(left_offset, right_offset)
+        if left_offset > offset:
+            left = [0] * (left_offset - offset) + left
+        elif right_offset > offset:
+            right = [0] * (right_offset - offset) + right
+        return self._from_parts(combine(left, right), denominator, offset)
+
+    def __add__(self, other):
+        """Return the rational function self + other.
+
+        Constraints:
+            other follows the class's operand rules.
+
+        Time:
+            O(N log(N + 1) + D) for N coefficients across the operands and
+            a gap D between their lowest degrees when both are nonzero.
+
+        Space:
+            O(N + D).
+        """
+        return self._sum(other, polynomial_add)
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        """Return the rational function self - other.
+
+        Constraints:
+            other follows the class's operand rules.
+
+        Time:
+            O(N log(N + 1) + D) for N coefficients across the operands and
+            a gap D between their lowest degrees when both are nonzero.
+
+        Space:
+            O(N + D).
+        """
+        return self._sum(other, polynomial_sub)
+
+    def __rsub__(self, other):
+        """Return the rational function other - self.
+
+        Constraints:
+            other follows the class's operand rules.
+
+        Time:
+            O(N log(N + 1) + D) for N coefficients across the operands and
+            a gap D between their lowest degrees when both are nonzero.
+
+        Space:
+            O(N + D).
+        """
+        other = self._coerce(other)
+        if other is NotImplemented:
+            return NotImplemented
+        return other - self
+
+    def __neg__(self):
+        """Return the rational function -self.
+
+        Constraints:
+            No additional constraints.
+
+        Time:
+            O(N + 1) for numerator length N.
+
+        Space:
+            O(N + 1) additional.
+        """
+        return self._from_parts(fps_neg(self._numerator), self._denominator, self._offset)
+
+    def __mul__(self, other):
+        """Return the rational function self * other.
+
+        Constraints:
+            other follows the class's operand rules.
+
+        Time:
+            O(N log(N + 1)) for N coefficients across the operands.
+
+        Space:
+            O(N).
+        """
+        other = self._coerce(other)
+        if other is NotImplemented:
+            return NotImplemented
+        numerator = self._multiply(self._numerator, other._numerator)
+        denominator = self._multiply(self._denominator, other._denominator)
+        return self._from_parts(numerator, denominator, self._offset + other._offset)
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, other):
+        """Return the rational function self / other.
+
+        Constraints:
+            other follows the class's operand rules and is nonzero.
+
+        Time:
+            O(N log(N + 1)) for N coefficients across the operands.
+
+        Space:
+            O(N).
+        """
+        other = self._coerce(other)
+        if other is NotImplemented:
+            return NotImplemented
+        if not other._numerator:
+            raise ValueError("BostanMori division requires a nonzero divisor")
+        offset = self._offset - other._offset
+        if self._denominator == other._denominator:
+            return self._from_parts(self._numerator, other._numerator, offset)
+        numerator = self._multiply(self._numerator, other._denominator)
+        denominator = self._multiply(self._denominator, other._numerator)
+        return self._from_parts(numerator, denominator, offset)
+
+    def __rtruediv__(self, other):
+        """Return the rational function other / self.
+
+        Constraints:
+            other follows the class's operand rules and self is nonzero.
+
+        Time:
+            O(N log(N + 1)) for N coefficients across the operands.
+
+        Space:
+            O(N).
+        """
+        other = self._coerce(other)
+        if other is NotImplemented:
+            return NotImplemented
+        return other / self
+
+    def __pow__(self, exponent: int):
+        """Return the rational function raised to exponent.
+
+        Constraints:
+            exponent is a nonnegative integer.
+
+        Time:
+            O(N log(N + 1) + log(exponent + 1)) for N coefficients in the result.
+
+        Space:
+            O(N) additional.
+        """
+        if not isinstance(exponent, int):
+            return NotImplemented
+        if exponent < 0:
+            raise ValueError("BostanMori exponent must be nonnegative")
+        if exponent == 0:
+            return self._from_parts(self._ONE, self._ONE)
+        if exponent == 1:
+            return self.copy()
+        if not self._numerator:
+            return self._from_parts([], self._ONE)
+        return self._from_parts(
+            self._polynomial_power(self._numerator, exponent),
+            self._polynomial_power(self._denominator, exponent),
+            self._offset * exponent,
+        )
+
+    @staticmethod
+    def _polynomial_power(coeffs, exponent):
+        if len(coeffs) == 1:
+            return [pow(coeffs[0], exponent, MOD)]
+        result = coeffs
+        for bit in range(exponent.bit_length() - 2, -1, -1):
+            result = polynomial_mul(result, result)
+            if exponent >> bit & 1:
+                result = polynomial_mul(result, coeffs)
+        return result
+
+    def inv(self):
+        """Return the multiplicative inverse of the rational function.
+
+        Constraints:
+            The rational function is nonzero.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1) additional.
+        """
+        if not self._numerator:
+            raise ValueError("BostanMori inverse requires a nonzero function")
+        return self._from_parts(self._denominator, self._numerator, -self._offset)
+
+    def shift(self, amount: int):
+        """Multiply the rational function by x**amount.
+
+        Constraints:
+            amount is an integer.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1) additional.
+        """
+        if not isinstance(amount, int):
+            raise TypeError("BostanMori shift amount must be an integer")
+        return self._from_parts(self._numerator, self._denominator, self._offset + amount)
+
+    def __lshift__(self, k: int):
+        """Return the rational function multiplied by x**k.
+
+        Constraints:
+            k is a nonnegative integer.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1) additional.
+        """
+        if not isinstance(k, int):
+            return NotImplemented
+        if k < 0:
+            raise ValueError("negative shift count")
+        return self.shift(k)
+
+    def __rshift__(self, k: int):
+        """Return the rational function divided by x**k, retaining negative degrees.
+
+        Constraints:
+            k is a nonnegative integer.
+
+        Time:
+            O(1).
+
+        Space:
+            O(1) additional.
+        """
+        if not isinstance(k, int):
+            return NotImplemented
+        if k < 0:
+            raise ValueError("negative shift count")
+        return self.shift(-k)
+
+    def calc_kth(self, k: int) -> int:
+        """Return the coefficient of x**k modulo 998244353 in the stored rational function.
+
+        Constraints:
+            k is an integer and may be negative.
+
+        Time:
+            O(N log(N + 1) log(d + 2)) for N stored coefficients in total
+            and d the distance from k to the lowest nonzero degree when k is at least that degree.
+            O(1) below the lowest degree or for a monomial denominator with the modulus fixed.
+
+        Space:
+            O(N) additional.
+        """
+        numerator, denominator = self._numerator, self._denominator
+        k -= self._offset
+        if not numerator or k < 0:
+            return 0
+        if len(denominator) == 1 or k == 0:
+            if k >= len(numerator):
+                return 0
+            coefficient = numerator[k]
+            return coefficient * pow(denominator[0], MOD - 2, MOD) % MOD
+        if len(numerator) >= len(denominator):
+            if len(numerator) > k + 1:
+                numerator = numerator[:k + 1]
+            if len(numerator) >= len(denominator):
+                numerator = polynomial_mod(numerator, denominator)
+        return bostan_mori(numerator, denominator, k)
+
+
 class GeneratingFunction:
     """Convert coefficient arrays modulo 998244353, retaining factorial tables.
 
