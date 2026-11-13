@@ -3881,11 +3881,12 @@ class FPS:
 
     __slots__ = ("_coeffs", "_deg")
 
-    def __init__(self, coeffs: list[int], deg: int) -> None:
+    def __init__(self, coeffs: list[int], deg: int = -1) -> None:
         """Copy the coefficients below degree deg, in increasing degree order.
+        Use len(coeffs) as the precision when deg is -1.
 
         Constraints:
-            deg >= 0; 0 <= coeffs[i] < 998244353.
+            deg >= 0 or deg == -1; 0 <= coeffs[i] < 998244353.
 
         Time:
             O(min(len(coeffs), deg)).
@@ -3893,6 +3894,8 @@ class FPS:
         Space:
             O(min(len(coeffs), deg)).
         """
+        if deg == -1:
+            deg = len(coeffs)
         self._coeffs = coeffs[:deg]
         self._deg = deg
 
